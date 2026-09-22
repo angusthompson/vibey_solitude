@@ -1,0 +1,6 @@
+/build/
+out.log
+err.log
+*.obj
+*.pdb
+*.ilk

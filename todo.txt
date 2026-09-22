@@ -1,0 +1,13 @@
+ 1 Collision with houses and other objects
+    It should be possible to jump over bins.
+
+ 3 Street bins
+    Move closer to lampposts
+ 4 Proper speech boxes and branching dialogue
+    The character should stop moving while in dialogue.
+ 5 Enterable houses
+    Add a portrait to the wall of the interior of each house. For now these can be simple beige rectangles with white circles inside. Later they will be pngs.
+
+ - More music
+ 
+ - Shops?
