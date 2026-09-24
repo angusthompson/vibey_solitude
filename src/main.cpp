@@ -212,17 +212,25 @@ static const char* FogVertexShaderCode = R"(
 #version 330
 in vec3 vertexPosition;
 in vec2 vertexTexCoord;
+in vec3 vertexNormal;
 in vec4 vertexColor;
 uniform mat4 mvp;
 uniform mat4 matModel;
 out vec2 fragTexCoord;
 out vec4 fragColor;
 out vec3 fragPosition;
+out vec3 fragNormal;
 void main()
 {
     fragTexCoord = vertexTexCoord;
     fragColor = vertexColor;
     fragPosition = vec3(matModel * vec4(vertexPosition, 1.0));
+    // Not transformed by matModel like fragPosition above - raylib's primitives (DrawCube,
+    // DrawSphere, ...) don't reliably feed it, the same reason fragPosition itself is only
+    // trusted in specific spots elsewhere in this shader. Nothing in this game is ever rotated
+    // (everything is axis-aligned boxes and spheres, just translated/scaled), so the object-space
+    // normal already equals the world-space one and skipping that multiply sidesteps the problem.
+    fragNormal = vertexNormal;
     gl_Position = mvp * vec4(vertexPosition, 1.0);
 }
 )";
@@ -232,6 +240,7 @@ static const char* FogFragmentShaderCode = R"(
 in vec2 fragTexCoord;
 in vec4 fragColor;
 in vec3 fragPosition;
+in vec3 fragNormal;
 uniform sampler2D texture0;
 uniform vec4 colDiffuse;
 uniform vec3 fogColor;
@@ -261,6 +270,16 @@ void main()
     float luminance = dot(baseColor.rgb, vec3(0.299, 0.587, 0.114));
     vec3 desaturated = mix(baseColor.rgb, vec3(luminance), desaturation);
     desaturated *= ambientBrightness;
+
+    // Cheap per-face shading from a fixed key light direction (no real light/shadow casting,
+    // just a normal-vs-light dot product) - without this every face of every box in the game
+    // is the exact same flat brightness, which is what made rooms and furniture look so flat.
+    // Half-lambert (the *0.5+0.5 remap) keeps the far side of an object dimly lit rather than
+    // pure black, which reads better on plain, unlit geometry like this than true Lambert does.
+    vec3 shadeLightDir = normalize(vec3(0.35, 0.82, 0.25));
+    float ndotl = dot(normalize(fragNormal), shadeLightDir);
+    float shade = ndotl * 0.5 + 0.5;
+    desaturated *= mix(0.55, 1.0, shade);
 
     // Localized streetlight illumination: ambient is kept low overall, and this brightens
     // whatever's near a lamp on top of it - no shadowing, just a per-fragment falloff summed
@@ -520,6 +539,13 @@ int main(void)
     const float firstWindowY = 3.6f;
     const float floorSpacing = 3.0f;
     const float topMargin = 1.5f;
+    // A ground-floor window either side of the door - matches where the interior's own
+    // windows now sit (flanking the door on the entrance wall), so looking out one from
+    // inside and looking at one from outside line up.
+    const float doorWindowZOffset = 1.3f;
+    const float doorWindowY = 1.7f;
+    const float doorWindowHeight = 1.5f;
+    const float doorWindowWidth = 1.0f;
 
     for (int side = -1; side <= 1; side += 2)
     {
@@ -670,6 +696,26 @@ int main(void)
         bins.push_back(Bin{ Vector3{ light.poleBase.x + side * 0.45f, 0.0f, light.poleBase.z + 0.5f } });
     }
 
+    // Supermarket: one big, brightly lit building at the end of the street past the last
+    // house - low and pale against the dim, towering houses, with a couple of extra "lights"
+    // (below) so the ground out front actually looks lit up rather than just being a pale box.
+    // Positioned beside the road rather than straddling it: its near edge lines up with the
+    // house rows' own near edge (streetHalfWidth - 4, the houses' own half-depth), so it reads
+    // as continuing the row rather than blocking the street.
+    const float supermarketWidth = 22.0f;
+    const float supermarketDepth = 14.0f;
+    const float supermarketHeight = 7.0f;
+    const float supermarketZ = houseStartZ + housesPerSide * houseSpacingZ + 20.0f;
+    const float supermarketX = (streetHalfWidth - 4.0f) + supermarketWidth / 2.0f;
+    const Vector3 supermarketPosition = { supermarketX, supermarketHeight / 2.0f, supermarketZ };
+    const Vector3 supermarketSize = { supermarketWidth, supermarketHeight, supermarketDepth };
+    const Color supermarketColor = Color{ 235, 232, 220, 255 };
+    const float supermarketDoorWidth = 3.2f;
+    const float supermarketDoorHeight = 2.6f;
+    const Vector3 supermarketDoorPos = { supermarketX, 0.0f, supermarketPosition.z - supermarketDepth / 2.0f - 0.03f };
+    const Vector3 supermarketGlowPos1 = { supermarketX - 4.0f, 3.0f, supermarketDoorPos.z };
+    const Vector3 supermarketGlowPos2 = { supermarketX + 4.0f, 3.0f, supermarketDoorPos.z };
+
     // Each puddle remembers the streetlight closest to it, for a cheap stand-in "reflection":
     // a blurry warm glow blob in the puddle shader, rather than a real mirrored render pass.
     for (Puddle& puddle : puddles)
@@ -718,6 +764,8 @@ int main(void)
     const float bulbRadius = 0.13f;
 
     const Color doorColor = Color{ 35, 24, 16, 255 };
+    const Color supermarketGlassColor = Color{ 210, 232, 236, 255 };
+    const Color supermarketWindowColor = Color{ 255, 230, 165, 255 };
     const Color litWindowColor = Color{ 230, 190, 120, 255 };
     const Color darkWindowColor = Color{ 14, 18, 24, 255 };
     const Color treeTrunkColor = Color{ 58, 42, 30, 255 };
@@ -865,6 +913,8 @@ int main(void)
     // Streetlights don't move, so their positions only need uploading once.
     std::vector<Vector3> lightPositionsForShader;
     for (const StreetLight& light : streetLights) lightPositionsForShader.push_back(light.bulbPosition);
+    lightPositionsForShader.push_back(supermarketGlowPos1);
+    lightPositionsForShader.push_back(supermarketGlowPos2);
     int lightCountForShader = (int)lightPositionsForShader.size();
     SetShaderValueV(fogShader, lightPositionsLoc, lightPositionsForShader.data(), SHADER_UNIFORM_VEC3, lightCountForShader);
     SetShaderValue(fogShader, lightCountLoc, &lightCountForShader, SHADER_UNIFORM_INT);
@@ -885,27 +935,37 @@ int main(void)
     const float binCollisionRadius = 0.35f;
     const float binClearHeight = 0.5f; // jump above this (feet height off the ground) to clear a bin
     const float fenceHalfThickness = 0.1f;
+
+    // Pushes pos out of an axis-aligned box (given as a half-width/half-depth around a center),
+    // expanded by the player's radius - shared by the house/supermarket exterior collision below
+    // and, later, by the furniture/rack collision inside the interiors.
+    auto pushFromBox = [&](Vector3& pos, Vector3 center, float halfX, float halfZ)
+    {
+        float minX = center.x - halfX - playerRadius;
+        float maxX = center.x + halfX + playerRadius;
+        float minZ = center.z - halfZ - playerRadius;
+        float maxZ = center.z + halfZ + playerRadius;
+        if (pos.x > minX && pos.x < maxX && pos.z > minZ && pos.z < maxZ)
+        {
+            float penLeft = pos.x - minX;
+            float penRight = maxX - pos.x;
+            float penBottom = pos.z - minZ;
+            float penTop = maxZ - pos.z;
+            float minPen = fminf(fminf(penLeft, penRight), fminf(penBottom, penTop));
+            if (minPen == penLeft) pos.x = minX;
+            else if (minPen == penRight) pos.x = maxX;
+            else if (minPen == penBottom) pos.z = minZ;
+            else pos.z = maxZ;
+        }
+    };
+
     auto resolveCollisions = [&](Vector3 pos, float feetHeight) -> Vector3
     {
         for (const House& house : houses)
         {
-            float minX = house.position.x - house.size.x / 2.0f - playerRadius;
-            float maxX = house.position.x + house.size.x / 2.0f + playerRadius;
-            float minZ = house.position.z - house.size.z / 2.0f - playerRadius;
-            float maxZ = house.position.z + house.size.z / 2.0f + playerRadius;
-            if (pos.x > minX && pos.x < maxX && pos.z > minZ && pos.z < maxZ)
-            {
-                float penLeft = pos.x - minX;
-                float penRight = maxX - pos.x;
-                float penBottom = pos.z - minZ;
-                float penTop = maxZ - pos.z;
-                float minPen = fminf(fminf(penLeft, penRight), fminf(penBottom, penTop));
-                if (minPen == penLeft) pos.x = minX;
-                else if (minPen == penRight) pos.x = maxX;
-                else if (minPen == penBottom) pos.z = minZ;
-                else pos.z = maxZ;
-            }
+            pushFromBox(pos, house.position, house.size.x / 2.0f, house.size.z / 2.0f);
         }
+        pushFromBox(pos, supermarketPosition, supermarketSize.x / 2.0f, supermarketSize.z / 2.0f);
 
         auto pushFromCircle = [&](Vector3 obstacle, float obstacleRadius)
         {
@@ -948,11 +1008,140 @@ int main(void)
         return pos;
     };
 
+    // "Real" window views: a small render-texture snapshot of the actual street, captured from
+    // just outside whichever house's door was last entered - not live/animated (captured once
+    // on entry rather than every frame, since re-rendering the whole street twice a frame just
+    // for a small window decal isn't worth the cost), but genuinely rendered 3D geometry with
+    // correct depth and perspective from that house's own spot, rather than a painted backdrop.
+    RenderTexture2D windowView1 = LoadRenderTexture(320, 320);
+    RenderTexture2D windowView2 = LoadRenderTexture(320, 320);
+
+    auto captureWindowView = [&](RenderTexture2D target, Vector3 camPos, Vector3 camTarget)
+    {
+        Camera3D viewCam = { 0 };
+        viewCam.position = camPos;
+        viewCam.target = camTarget;
+        viewCam.up = Vector3{ 0.0f, 1.0f, 0.0f };
+        viewCam.fovy = 70.0f;
+        viewCam.projection = CAMERA_PERSPECTIVE;
+
+        // A trimmed-down, self-contained redraw of the static street (no rain/puddles/
+        // pedestrians/clouds) rather than reusing the main frame's draw block directly - the
+        // main block's shader-state sequencing (matModel resets, local-light toggles) is
+        // tightly tied to being called exactly once per frame in a specific order, and
+        // duplicating just the static geometry here is safer than trying to make that whole
+        // sequence re-entrant for a second, occasional camera.
+        BeginTextureMode(target);
+            ClearBackground(skyColor);
+            SetShaderValue(fogShader, viewPosLoc, &camPos, SHADER_UNIFORM_VEC3);
+            BeginMode3D(viewCam);
+                BeginShaderMode(fogShader);
+                    SetShaderValue(fogShader, enableLocalLightLoc, &localLightOn, SHADER_UNIFORM_FLOAT);
+                    SetShaderValue(fogShader, reflectivityLoc, &roadReflectivity, SHADER_UNIFORM_FLOAT);
+                    DrawModel(roadModel, Vector3{ 0.0f, -roadRecess, 0.0f }, 1.0f, roadColor);
+                    SetShaderValue(fogShader, reflectivityLoc, &noReflectivity, SHADER_UNIFORM_FLOAT);
+                    DrawModel(pavementModel, Vector3{ -pavementCenterX, 0.0f, 0.0f }, 1.0f, WHITE);
+                    DrawModel(pavementModel, Vector3{ pavementCenterX, 0.0f, 0.0f }, 1.0f, WHITE);
+                    DrawModel(fieldModel, Vector3{ -fieldCenterX, 0.0f, 0.0f }, 1.0f, WHITE);
+                    DrawModel(fieldModel, Vector3{ fieldCenterX, 0.0f, 0.0f }, 1.0f, WHITE);
+
+                    SetShaderValueMatrix(fogShader, matModelLoc, MatrixIdentity());
+                    SetShaderValue(fogShader, enableLocalLightLoc, &localLightOff, SHADER_UNIFORM_FLOAT);
+
+                    DrawCube(Vector3{ -(roadWidth / 2.0f - curbWidth / 2.0f), -roadRecess / 2.0f, 0.0f }, curbWidth, roadRecess, roadLength, LIGHTGRAY);
+                    DrawCube(Vector3{ (roadWidth / 2.0f - curbWidth / 2.0f), -roadRecess / 2.0f, 0.0f }, curbWidth, roadRecess, roadLength, LIGHTGRAY);
+
+                    for (const House& h : houses)
+                    {
+                        DrawCube(h.position, h.size.x, h.size.y, h.size.z, h.color);
+                        DrawCubeWires(h.position, h.size.x, h.size.y, h.size.z, DARKGRAY);
+                        float faceX = h.doorPos.x;
+                        DrawCube(Vector3{ faceX, doorHeight / 2.0f, h.position.z }, 0.06f, doorHeight, 1.0f, doorColor);
+                        int windowRows = (int)h.windowsLit.size() / 2;
+                        for (int r = 0; r < windowRows; r++)
+                        {
+                            float wy = firstWindowY + r * floorSpacing;
+                            Color win1Color = h.windowsLit[r * 2] ? litWindowColor : darkWindowColor;
+                            Color win2Color = h.windowsLit[r * 2 + 1] ? litWindowColor : darkWindowColor;
+                            DrawCube(Vector3{ faceX, wy, h.position.z - windowZOffset }, 0.06f, windowHeight, windowWidth, win1Color);
+                            DrawCube(Vector3{ faceX, wy, h.position.z + windowZOffset }, 0.06f, windowHeight, windowWidth, win2Color);
+                        }
+                        DrawCube(Vector3{ faceX, doorWindowY, h.position.z - doorWindowZOffset }, 0.06f, doorWindowHeight, doorWindowWidth, litWindowColor);
+                        DrawCube(Vector3{ faceX, doorWindowY, h.position.z + doorWindowZOffset }, 0.06f, doorWindowHeight, doorWindowWidth, litWindowColor);
+                    }
+
+                    DrawCube(supermarketPosition, supermarketSize.x, supermarketSize.y, supermarketSize.z, supermarketColor);
+                    DrawCube(Vector3{ supermarketDoorPos.x, supermarketDoorHeight / 2.0f, supermarketDoorPos.z }, supermarketDoorWidth, supermarketDoorHeight, 0.08f, supermarketGlassColor);
+
+                    for (const Tree& tree : trees)
+                    {
+                        DrawCylinder(tree.position, 0.2f, 0.25f, tree.trunkHeight, 8, treeTrunkColor);
+                        Vector3 foliageCenter = { tree.position.x, tree.position.y + tree.trunkHeight + tree.foliageRadius * 0.6f, tree.position.z };
+                        DrawSphere(foliageCenter, tree.foliageRadius, treeFoliageColor);
+                    }
+
+                    for (const Fence& fence : fences)
+                    {
+                        float length = fence.end.z - fence.start.z;
+                        int postCount = (int)(length / 1.5f) + 1;
+                        for (int p = 0; p <= postCount; p++)
+                        {
+                            float t = (float)p / (float)postCount;
+                            float z = fence.start.z + t * length;
+                            DrawCylinder(Vector3{ fence.start.x, 0.0f, z }, 0.03f, 0.03f, 1.1f, 6, fenceColor);
+                        }
+                        DrawLine3D(Vector3{ fence.start.x, 0.35f, fence.start.z }, Vector3{ fence.start.x, 0.35f, fence.end.z }, fenceColor);
+                        DrawLine3D(Vector3{ fence.start.x, 0.7f, fence.start.z }, Vector3{ fence.start.x, 0.7f, fence.end.z }, fenceColor);
+                        DrawLine3D(Vector3{ fence.start.x, 1.05f, fence.start.z }, Vector3{ fence.start.x, 1.05f, fence.end.z }, fenceColor);
+                    }
+
+                    for (const Bin& bin : bins)
+                    {
+                        DrawCylinder(bin.position, 0.28f, 0.22f, 0.6f, 10, binColor);
+                        DrawCylinderWires(bin.position, 0.28f, 0.22f, 0.6f, 10, DARKGRAY);
+                    }
+
+                    for (const StreetLight& light : streetLights)
+                    {
+                        Vector3 poleCenter = { light.poleBase.x, (light.poleBase.y + light.poleTop.y) / 2.0f, light.poleBase.z };
+                        float poleHeight = light.poleTop.y - light.poleBase.y;
+                        DrawCube(poleCenter, poleThickness, poleHeight, poleThickness, lightPoleColor);
+                        Vector3 armCenter = { (light.poleTop.x + light.bulbPosition.x) / 2.0f, light.poleTop.y, light.poleTop.z };
+                        float armLength = fabsf(light.bulbPosition.x - light.poleTop.x);
+                        DrawCube(armCenter, armLength, armThickness, armThickness, lightPoleColor);
+                        DrawSphere(light.bulbPosition, bulbRadius, lightBulbColor);
+                    }
+                    BeginBlendMode(BLEND_ADDITIVE);
+                        for (const StreetLight& light : streetLights)
+                        {
+                            DrawBillboard(viewCam, glowTexture, light.bulbPosition, lightGlowSize, lightGlowColor);
+                        }
+                    EndBlendMode();
+                EndShaderMode();
+            EndMode3D();
+        EndTextureMode();
+    };
+
+    // Seed both window views from the first house so they're never blank before the player's
+    // first visit to any house. Each camera sits right where that house's own ground-floor
+    // window (see doorWindowZOffset above) actually is, facing straight out across the street
+    // - the same direction the door itself faces.
+    if (!houses.empty())
+    {
+        const House& firstHouse = houses[0];
+        const float windowCamSetback = 0.3f;
+        float windowZ1 = firstHouse.position.z - doorWindowZOffset;
+        float windowZ2 = firstHouse.position.z + doorWindowZOffset;
+        float camX = firstHouse.doorPos.x - firstHouse.side * windowCamSetback;
+        captureWindowView(windowView1, Vector3{ camX, doorWindowY, windowZ1 }, Vector3{ camX - firstHouse.side * 5.0f, doorWindowY, windowZ1 });
+        captureWindowView(windowView2, Vector3{ camX, doorWindowY, windowZ2 }, Vector3{ camX - firstHouse.side * 5.0f, doorWindowY, windowZ2 });
+    }
+
     // A single shared "simple box for now" interior that every house's door leads into. Which
     // painting hangs on the far wall, and which exterior spot "outside" leads back to, both
     // change per house - only the room shape itself is reused.
     const Vector3 interiorCenter = Vector3{ 5000.0f, 0.0f, 0.0f };
-    const float interiorHalfSize = 3.0f;
+    const float interiorHalfSize = 4.0f; // widened to give the now-larger furniture room to sit clear of the door/windows
     const float interiorHeight = 3.2f;
     const Color interiorFloorColor = Color{ 90, 70, 55, 255 };
     const Color interiorWallColor = Color{ 130, 120, 110, 255 };
@@ -971,25 +1160,124 @@ int main(void)
     const Vector3 interiorDoorCenter = Vector3{ interiorCenter.x, doorHeight / 2.0f, interiorCenter.z - interiorHalfSize + 0.11f };
     const Vector3 interiorSpawnPos = Vector3{ interiorCenter.x, eyeHeight, interiorCenter.z - interiorHalfSize + 1.5f };
 
-    // Outlooking windows on the side walls: a glass-tinted decal plus a few static rain
-    // streaks just in front of it - not a real view outside (the interior isn't anywhere near
-    // the actual street), just enough to suggest one through the glass.
-    const float interiorWindowY = interiorHeight * 0.6f;
+    // Outlooking windows: on the entrance wall, flanking the door like real windows beside a
+    // front door - a glass-tinted decal over the real render-texture snapshot taken from that
+    // exact spot on the house's own front (see captureWindowView calls below), plus a handful
+    // of rain streaks animated trickling down the glass.
+    const float interiorWindowY = 1.7f;
     const float interiorWindowSize = 1.1f;
-    const Color interiorGlassColor = Color{ 40, 46, 56, 220 };
-    const Color interiorRainColor = Color{ 170, 185, 210, 160 };
+    const float doorWindowXOffset = 1.6f; // how far left/right of the door each window sits
+    const Color interiorGlassColor = Color{ 70, 90, 110, 110 };
+    const Color interiorRainColor = Color{ 170, 185, 210, 190 };
+    // How far the backdrop and glass panes sit off the wall's own inner face (interiorHalfSize
+    // - 0.1). The wall-to-backdrop gap used to be a bare 0.005 - at this room's world-coordinate
+    // offset (~5000) that's only a handful of floating point ULPs, which z-fought and flickered
+    // as the camera moved. A previous fix overcorrected this (0.18/0.32), pushing the glass
+    // 0.22 proud of the wall - visibly floating in front of it rather than looking inset. This
+    // keeps the safety margin (still ~50x the old gap) without detaching the pane from the wall.
+    const float windowBackdropOffset = 0.13f;
+    const float windowGlassOffset = 0.16f;
+
+    // Each drop waits invisibly, then "strikes" the glass at a random spot (a brief bright
+    // flash) before trickling down and vanishing at the bottom - rather than an endless
+    // streak, so it actually reads as individual rain hitting the window.
+    enum WindowRainState { RAIN_WAITING, RAIN_IMPACT, RAIN_DRIPPING };
+    struct WindowRainDrop { WindowRainState state; float xOffset; float y; float speed; float length; float timer; };
+    const float windowRainImpactDuration = 0.12f;
+    std::vector<WindowRainDrop> windowRainDrops;
+    for (int i = 0; i < 6; i++)
+    {
+        WindowRainDrop drop;
+        drop.state = RAIN_WAITING;
+        drop.xOffset = 0.0f;
+        drop.y = interiorWindowY;
+        drop.speed = (float)GetRandomValue(50, 120) / 100.0f;
+        drop.length = (float)GetRandomValue(10, 22) / 100.0f;
+        drop.timer = (float)GetRandomValue(0, 80) / 100.0f;
+        windowRainDrops.push_back(drop);
+    }
+
+    // Furniture: a plain table-and-chairs plus a sofa, twice the size of the original set and
+    // pushed out to the room's edges - fixed in place (same every house, like the room shape
+    // itself) rather than varied per house. Table+chairs sit against the east wall, south of
+    // the window; the sofa sits against the west wall, north of the window - both clear of the
+    // door swing, the painting wall, and the windows.
+    const Color furnitureWoodColor = Color{ 92, 62, 40, 255 };
+    const Color sofaColor = Color{ 70, 60, 85, 255 };
+    const Vector3 tableCenter = { interiorCenter.x + interiorHalfSize - 1.0f, 0.0f, interiorCenter.z - 2.0f };
+    const Vector3 chairACenter = { interiorCenter.x + interiorHalfSize - 2.3f, 0.0f, interiorCenter.z - 2.45f };
+    const Vector3 chairBCenter = { interiorCenter.x + interiorHalfSize - 2.3f, 0.0f, interiorCenter.z - 1.55f };
+    const Vector3 sofaCenter = { interiorCenter.x - interiorHalfSize + 0.9f, 0.0f, interiorCenter.z + 2.3f };
+
+    // A single warm pendant lamp hanging from the middle of the ceiling - cord, shade and a
+    // bright bulb/glow rendered additively so it actually reads as the room's light source
+    // rather than just another ambient-darkened shape like the furniture.
+    const Color lampCordColor = Color{ 35, 33, 30, 255 };
+    const Color lampShadeColor = Color{ 195, 150, 85, 255 };
+    const Color lampGlowColor = Color{ 255, 195, 120, 220 };
+    const Vector3 lampShadeCenter = { interiorCenter.x, interiorHeight - 0.85f, interiorCenter.z };
 
     const float interactRange = 4.0f;
     const float interactCos = 0.94f; // a bit more forgiving than the old look-straight-at check
 
     bool inDialogue = false;
     bool inInterior = false;
+    bool inSupermarket = false; // which shared interior inInterior currently refers to
     std::string dialogueName;
     std::string dialogueText;
     int dialoguePedestrianIndex = -1; // which pedestrian (if any) to freeze while talking to them
     int currentPaintingIndex = -1;    // which poster to show inside, set on entry to match the house
     Vector3 exteriorReturnPos = camera.position;
     Vector3 exteriorReturnTarget = camera.target;
+
+    // The supermarket's own shared interior - a separate, larger space (well clear of the house
+    // interior's offstage coordinates) with shelving racks instead of a painting and windows.
+    const Vector3 marketInteriorCenter = Vector3{ 6000.0f, 0.0f, 0.0f };
+    const float marketHalfSize = 7.0f;
+    const float marketHeight = 4.0f;
+    const Color marketFloorColor = Color{ 200, 198, 190, 255 };
+    const Color marketWallColor = Color{ 225, 223, 215, 255 };
+    const Vector3 marketDoorCenter = Vector3{ marketInteriorCenter.x, supermarketDoorHeight / 2.0f, marketInteriorCenter.z - marketHalfSize + 0.11f };
+    const Vector3 marketSpawnPos = Vector3{ marketInteriorCenter.x, eyeHeight, marketInteriorCenter.z - marketHalfSize + 2.0f };
+    // Windows flanking the market's own (much wider) door, same real-render-texture-through-
+    // glass treatment as the house windows, reusing the same windowView1/windowView2 textures
+    // and windowRainDrops animation (only one interior is ever visible at a time, so nothing
+    // needs its own copy).
+    const float marketDoorWindowXOffset = supermarketDoorWidth / 2.0f + 1.0f;
+    // Same height as the house windows (not just similar) - they share one animated raindrop
+    // array between rooms, and that array's Y values are only meaningful at a single height.
+    const float marketWindowY = interiorWindowY;
+    const Color rackFrameColor = Color{ 140, 140, 145, 255 };
+    const Color rackProductColors[3] = { Color{ 190, 60, 50, 255 }, Color{ 60, 110, 190, 255 }, Color{ 90, 160, 70, 255 } };
+    const float rackHalfX = 0.4f;
+    const float rackHalfZ = 2.5f;
+    const float rackHeight = 1.8f;
+    const Vector3 rackCenters[3] = {
+        { marketInteriorCenter.x - 4.0f, 0.0f, marketInteriorCenter.z + 1.0f },
+        { marketInteriorCenter.x,        0.0f, marketInteriorCenter.z + 1.0f },
+        { marketInteriorCenter.x + 4.0f, 0.0f, marketInteriorCenter.z + 1.0f },
+    };
+
+    // Checkout counter: off to one side near the entrance, out of the way of the aisles between
+    // the racks. The employee stands on the far side of it from the door, facing the player.
+    const Color counterColor = Color{ 165, 130, 95, 255 };
+    const Color registerColor = Color{ 60, 60, 65, 255 };
+    const Vector3 counterCenter = { marketInteriorCenter.x + 5.0f, 0.0f, marketInteriorCenter.z - marketHalfSize + 3.0f };
+    const float counterHalfX = 0.9f;
+    const float counterHalfZ = 0.45f;
+    const float counterHeight = 1.0f;
+    const Vector3 registerCenter = { counterCenter.x - 0.4f, counterHeight + 0.16f, counterCenter.z - 0.1f };
+    const Color employeeBodyColor = Color{ 70, 95, 120, 255 };
+    const Color employeeHeadColor = Color{ 225, 190, 160, 255 };
+    const Vector3 employeePos = { counterCenter.x, 0.0f, counterCenter.z + 0.7f };
+    const std::string employeeLine = "Checkout Clerk: \"Everything here is free, technically. Nobody has ever tried to leave with something. I don't think there's an outside to leave to.\"";
+
+    // Ceiling strip lights: a cold white-blue tube (additive, like the lamp above) inset into
+    // an opaque housing, one strip per aisle plus one extra along each side wall.
+    const Color marketStripHousingColor = Color{ 150, 155, 165, 255 };
+    const Color marketStripLightColor = Color{ 210, 232, 255, 230 };
+    const float marketStripLength = marketHalfSize * 2.0f - 3.0f;
+    const float marketStripXs[4] = { -5.25f, -1.75f, 1.75f, 5.25f };
 
     while (!WindowShouldClose())
     {
@@ -1152,8 +1440,35 @@ int main(void)
 
             if (inInterior)
             {
-                camera.position.x = Clamp(camera.position.x, interiorCenter.x - interiorHalfSize + playerRadius, interiorCenter.x + interiorHalfSize - playerRadius);
-                camera.position.z = Clamp(camera.position.z, interiorCenter.z - interiorHalfSize + playerRadius, interiorCenter.z + interiorHalfSize - playerRadius);
+                // Clamped/pushed on a scratch copy, then applied to position AND target
+                // together as a single delta - clamping camera.position alone (leaving target
+                // wherever free movement had already carried it) was the bug behind "walking
+                // into a wall rotates the camera instead of stopping": position would get
+                // pulled back to the wall while target kept drifting forward past it, skewing
+                // the apparent look direction a little more every frame the player held W.
+                Vector3 resolved = camera.position;
+                if (inSupermarket)
+                {
+                    resolved.x = Clamp(resolved.x, marketInteriorCenter.x - marketHalfSize + playerRadius, marketInteriorCenter.x + marketHalfSize - playerRadius);
+                    resolved.z = Clamp(resolved.z, marketInteriorCenter.z - marketHalfSize + playerRadius, marketInteriorCenter.z + marketHalfSize - playerRadius);
+                    for (const Vector3& rackCenter : rackCenters) pushFromBox(resolved, rackCenter, rackHalfX, rackHalfZ);
+                    pushFromBox(resolved, counterCenter, counterHalfX, counterHalfZ);
+                }
+                else
+                {
+                    resolved.x = Clamp(resolved.x, interiorCenter.x - interiorHalfSize + playerRadius, interiorCenter.x + interiorHalfSize - playerRadius);
+                    resolved.z = Clamp(resolved.z, interiorCenter.z - interiorHalfSize + playerRadius, interiorCenter.z + interiorHalfSize - playerRadius);
+                    pushFromBox(resolved, tableCenter, 0.8f, 0.8f);
+                    pushFromBox(resolved, chairACenter, 0.4f, 0.4f);
+                    pushFromBox(resolved, chairBCenter, 0.4f, 0.4f);
+                    pushFromBox(resolved, sofaCenter, 0.6f, 1.3f);
+                }
+                float dx = resolved.x - camera.position.x;
+                float dz = resolved.z - camera.position.z;
+                camera.position.x += dx;
+                camera.position.z += dz;
+                camera.target.x += dx;
+                camera.target.z += dz;
             }
             else
             {
@@ -1205,6 +1520,42 @@ int main(void)
             else i++;
         }
 
+        // Only advanced while indoors, since that's the only time the window panes are
+        // actually on screen.
+        if (inInterior)
+        {
+            float windowRainBottom = interiorWindowY - interiorWindowSize / 2.0f;
+            float windowRainTop = interiorWindowY + interiorWindowSize / 2.0f;
+            for (WindowRainDrop& drop : windowRainDrops)
+            {
+                drop.timer -= dt;
+                if (drop.state == RAIN_WAITING)
+                {
+                    if (drop.timer <= 0.0f)
+                    {
+                        drop.state = RAIN_IMPACT;
+                        drop.xOffset = (float)GetRandomValue(-45, 45) / 100.0f;
+                        drop.y = windowRainTop - (float)GetRandomValue(0, 70) / 100.0f;
+                        drop.speed = (float)GetRandomValue(50, 120) / 100.0f;
+                        drop.timer = windowRainImpactDuration;
+                    }
+                }
+                else if (drop.state == RAIN_IMPACT)
+                {
+                    if (drop.timer <= 0.0f) drop.state = RAIN_DRIPPING;
+                }
+                else // RAIN_DRIPPING
+                {
+                    drop.y -= drop.speed * dt;
+                    if (drop.y < windowRainBottom)
+                    {
+                        drop.state = RAIN_WAITING;
+                        drop.timer = (float)GetRandomValue(20, 90) / 100.0f;
+                    }
+                }
+            }
+        }
+
         SetShaderValue(fogShader, viewPosLoc, &camera.position, SHADER_UNIFORM_VEC3);
 
         // What's the player currently able to interact with? Angle+range checks against a
@@ -1218,23 +1569,44 @@ int main(void)
         std::string interactionPrompt;
         int interactionPedestrianIndex = -1; // which pedestrian, if INTERACT_TALK came from one (not a forgotten soul)
         int interactionHouseIndex = -1;      // which house, if INTERACT_ENTER
+        bool interactionIsSupermarket = false; // if INTERACT_ENTER came from the supermarket door, not a house
         Vector3 cameraForward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
 
         if (!inDialogue)
         {
             if (inInterior)
             {
-                // Uses the camera's own height rather than a fixed chest height: the room is
-                // small enough that a fixed reference point creates a steep, easily-missed
-                // look-angle at typical indoor distances (unlike the more distant outdoor
-                // door/pedestrian checks, where that vertical offset barely matters).
-                Vector3 doorChest = { interiorDoorCenter.x, camera.position.y, interiorDoorCenter.z };
-                Vector3 toDoor = Vector3Subtract(doorChest, camera.position);
-                float doorDist = Vector3Length(toDoor);
-                if (doorDist < interactRange && Vector3DotProduct(cameraForward, Vector3Scale(toDoor, 1.0f / doorDist)) > interactCos)
+                if (inSupermarket)
                 {
-                    interactionType = INTERACT_EXIT;
-                    interactionPrompt = "Press E to leave";
+                    Vector3 employeeChest = { employeePos.x, 1.1f, employeePos.z };
+                    Vector3 toEmployee = Vector3Subtract(employeeChest, camera.position);
+                    float employeeDist = Vector3Length(toEmployee);
+                    if (employeeDist < interactRange && Vector3DotProduct(cameraForward, Vector3Scale(toEmployee, 1.0f / employeeDist)) > interactCos)
+                    {
+                        std::string name, quote;
+                        ParseDialogueLine(employeeLine, name, quote);
+                        interactionType = INTERACT_TALK;
+                        interactionName = name;
+                        interactionLine = employeeLine;
+                        interactionPrompt = name + " - Press E to talk";
+                    }
+                }
+
+                if (interactionType == INTERACT_NONE)
+                {
+                    // Uses the camera's own height rather than a fixed chest height: the room is
+                    // small enough that a fixed reference point creates a steep, easily-missed
+                    // look-angle at typical indoor distances (unlike the more distant outdoor
+                    // door/pedestrian checks, where that vertical offset barely matters).
+                    Vector3 currentDoorCenter = inSupermarket ? marketDoorCenter : interiorDoorCenter;
+                    Vector3 doorChest = { currentDoorCenter.x, camera.position.y, currentDoorCenter.z };
+                    Vector3 toDoor = Vector3Subtract(doorChest, camera.position);
+                    float doorDist = Vector3Length(toDoor);
+                    if (doorDist < interactRange && Vector3DotProduct(cameraForward, Vector3Scale(toDoor, 1.0f / doorDist)) > interactCos)
+                    {
+                        interactionType = INTERACT_EXIT;
+                        interactionPrompt = "Press E to leave";
+                    }
                 }
             }
             else
@@ -1296,6 +1668,19 @@ int main(void)
                         }
                     }
                 }
+
+                if (interactionType == INTERACT_NONE)
+                {
+                    Vector3 doorChest = { supermarketDoorPos.x, 1.1f, supermarketDoorPos.z };
+                    Vector3 toTarget = Vector3Subtract(doorChest, camera.position);
+                    float dist = Vector3Length(toTarget);
+                    if (dist < interactRange && Vector3DotProduct(cameraForward, Vector3Scale(toTarget, 1.0f / dist)) > interactCos)
+                    {
+                        interactionType = INTERACT_ENTER;
+                        interactionPrompt = "Press E to enter";
+                        interactionIsSupermarket = true;
+                    }
+                }
             }
         }
 
@@ -1312,10 +1697,38 @@ int main(void)
             {
                 exteriorReturnPos = camera.position;
                 exteriorReturnTarget = camera.target;
-                camera.position = interiorSpawnPos;
-                camera.target = Vector3{ interiorSpawnPos.x, interiorSpawnPos.y, interiorSpawnPos.z + 1.0f };
+                inSupermarket = interactionIsSupermarket;
+                Vector3 spawnPos = inSupermarket ? marketSpawnPos : interiorSpawnPos;
+                camera.position = spawnPos;
+                camera.target = Vector3{ spawnPos.x, spawnPos.y, spawnPos.z + 1.0f };
                 inInterior = true;
-                currentPaintingIndex = (interactionHouseIndex >= 0) ? houses[interactionHouseIndex].paintingIndex : -1;
+                currentPaintingIndex = (!inSupermarket && interactionHouseIndex >= 0) ? houses[interactionHouseIndex].paintingIndex : -1;
+
+                // Snapshot this house's actual surroundings for its two window views - each
+                // camera sits right where that house's own ground-floor window actually is
+                // (flanking its door), facing straight out across the street, the same
+                // direction the door itself faces - so both the position (on the real
+                // building) and the content genuinely correspond to that window.
+                if (!inSupermarket && interactionHouseIndex >= 0)
+                {
+                    const House& enteredHouse = houses[interactionHouseIndex];
+                    const float windowCamSetback = 0.3f;
+                    float windowZ1 = enteredHouse.position.z - doorWindowZOffset;
+                    float windowZ2 = enteredHouse.position.z + doorWindowZOffset;
+                    float camX = enteredHouse.doorPos.x - enteredHouse.side * windowCamSetback;
+                    captureWindowView(windowView1, Vector3{ camX, doorWindowY, windowZ1 }, Vector3{ camX - enteredHouse.side * 5.0f, doorWindowY, windowZ1 });
+                    captureWindowView(windowView2, Vector3{ camX, doorWindowY, windowZ2 }, Vector3{ camX - enteredHouse.side * 5.0f, doorWindowY, windowZ2 });
+                }
+                else if (inSupermarket)
+                {
+                    // Same idea, at the supermarket's own two bright storefront windows
+                    // (supermarketGlowPos1/2's X positions), facing straight out the front,
+                    // the same direction as its door.
+                    const float windowCamSetback = 0.3f;
+                    float camZ = supermarketDoorPos.z - windowCamSetback;
+                    captureWindowView(windowView1, Vector3{ supermarketGlowPos1.x, doorWindowY, camZ }, Vector3{ supermarketGlowPos1.x, doorWindowY, camZ - 5.0f });
+                    captureWindowView(windowView2, Vector3{ supermarketGlowPos2.x, doorWindowY, camZ }, Vector3{ supermarketGlowPos2.x, doorWindowY, camZ - 5.0f });
+                }
             }
             else if (interactionType == INTERACT_EXIT)
             {
@@ -1325,6 +1738,7 @@ int main(void)
                 camera.position = exteriorReturnPos;
                 camera.target = Vector3Subtract(exteriorReturnPos, entryForward);
                 inInterior = false;
+                inSupermarket = false;
             }
         }
 
@@ -1425,7 +1839,40 @@ int main(void)
                             DrawCube(Vector3{ faceX, wy, house.position.z - windowZOffset }, 0.06f, windowHeight, windowWidth, win1Color);
                             DrawCube(Vector3{ faceX, wy, house.position.z + windowZOffset }, 0.06f, windowHeight, windowWidth, win2Color);
                         }
+
+                        // Ground-floor windows flanking the door - matches where the interior's
+                        // own windows sit, so what you see looking out one from inside lines up
+                        // with an actual window at that same spot on the outside.
+                        DrawCube(Vector3{ faceX, doorWindowY, house.position.z - doorWindowZOffset }, 0.06f, doorWindowHeight, doorWindowWidth, litWindowColor);
+                        DrawCube(Vector3{ faceX, doorWindowY, house.position.z + doorWindowZOffset }, 0.06f, doorWindowHeight, doorWindowWidth, litWindowColor);
                     }
+
+                    // Supermarket: a big pale box capping the street - deliberately low and
+                    // plain-colored rather than another tower, with a wide glass-look door, a
+                    // band of bright storefront glass either side of it, and a warm additive
+                    // glow over the entrance so it reads as lit up from well down the street.
+                    DrawCube(supermarketPosition, supermarketSize.x, supermarketSize.y, supermarketSize.z, supermarketColor);
+                    DrawCubeWires(supermarketPosition, supermarketSize.x, supermarketSize.y, supermarketSize.z, DARKGRAY);
+
+                    DrawCube(Vector3{ supermarketDoorPos.x, supermarketDoorHeight / 2.0f, supermarketDoorPos.z }, supermarketDoorWidth, supermarketDoorHeight, 0.08f, supermarketGlassColor);
+
+                    // Window panels are additive rather than opaque - summed on top of the pale
+                    // wall already drawn behind them, so they actually read as glowing instead
+                    // of just being another (ambient-darkened, same as everything else at night)
+                    // flat color.
+                    BeginBlendMode(BLEND_ADDITIVE);
+                        {
+                            float marketWindowY = supermarketHeight * 0.55f;
+                            float marketWindowHeight = supermarketHeight * 0.5f;
+                            for (int wi = -1; wi <= 1; wi += 2)
+                            {
+                                float wx = supermarketDoorPos.x + wi * (supermarketDoorWidth / 2.0f + 2.2f);
+                                DrawCube(Vector3{ wx, marketWindowY, supermarketDoorPos.z }, 3.6f, marketWindowHeight, 0.08f, supermarketWindowColor);
+                            }
+                        }
+                        DrawBillboard(camera, glowTexture, supermarketGlowPos1, 7.0f, lightGlowColor);
+                        DrawBillboard(camera, glowTexture, supermarketGlowPos2, 7.0f, lightGlowColor);
+                    EndBlendMode();
 
                     for (const Fence& fence : fences)
                     {
@@ -1481,20 +1928,239 @@ int main(void)
                         DrawSphere(Vector3{ portraitCenter.x, portraitCenter.y, portraitCenter.z - 0.08f }, 0.25f, portraitCircleColor);
                     }
 
-                    // Outlooking windows: a tinted glass decal on each side wall, with a few
-                    // static rain streaks just in front for the illusion of weather outside -
-                    // not a real view (the interior isn't anywhere near the actual street).
+                    // Outlooking windows: on the entrance wall, flanking the door, the real
+                    // render-texture snapshot of this house's own front-of-building view, a
+                    // tinted pane of glass (real alpha transparency) a hair in front of it, and
+                    // rain trickling down the glass.
                     {
-                        Vector3 westWindow = { interiorCenter.x - interiorHalfSize + 0.11f, interiorWindowY, interiorCenter.z };
-                        Vector3 eastWindow = { interiorCenter.x + interiorHalfSize - 0.11f, interiorWindowY, interiorCenter.z };
-                        DrawCube(westWindow, 0.04f, interiorWindowSize, interiorWindowSize, interiorGlassColor);
-                        DrawCube(eastWindow, 0.04f, interiorWindowSize, interiorWindowSize, interiorGlassColor);
-                        for (int wr = -1; wr <= 1; wr++)
+                        Vector3 leftWindow = { interiorCenter.x - doorWindowXOffset, interiorWindowY, interiorCenter.z - interiorHalfSize + windowGlassOffset };
+                        Vector3 rightWindow = { interiorCenter.x + doorWindowXOffset, interiorWindowY, interiorCenter.z - interiorHalfSize + windowGlassOffset };
+                        float bz = interiorCenter.z - interiorHalfSize + windowBackdropOffset;
+                        float halfW = interiorWindowSize / 2.0f;
+                        float lowY = interiorWindowY - halfW;
+                        float highY = interiorWindowY + halfW;
+                        float xL0 = leftWindow.x - halfW;
+                        float xL1 = leftWindow.x + halfW;
+                        float xR0 = rightWindow.x - halfW;
+                        float xR1 = rightWindow.x + halfW;
+
+                        // Emitted with both windings (like the puddle fans elsewhere) rather
+                        // than relying on rlDisableBackfaceCulling, which doesn't reliably
+                        // apply to batched/deferred rlgl draws like this one. V is flipped
+                        // relative to a normal texture - a RenderTexture2D's image is stored
+                        // bottom-row-first (OpenGL framebuffer convention), unlike a loaded
+                        // Texture2D, which raylib flips the right way up at load time.
+                        rlSetTexture(windowView1.texture.id);
+                        rlBegin(RL_QUADS);
+                            rlColor4ub(255, 255, 255, 255);
+                            rlTexCoord2f(0.0f, 0.0f); rlVertex3f(xL0, lowY, bz);
+                            rlTexCoord2f(1.0f, 0.0f); rlVertex3f(xL1, lowY, bz);
+                            rlTexCoord2f(1.0f, 1.0f); rlVertex3f(xL1, highY, bz);
+                            rlTexCoord2f(0.0f, 1.0f); rlVertex3f(xL0, highY, bz);
+                            rlTexCoord2f(0.0f, 0.0f); rlVertex3f(xL0, lowY, bz);
+                            rlTexCoord2f(0.0f, 1.0f); rlVertex3f(xL0, highY, bz);
+                            rlTexCoord2f(1.0f, 1.0f); rlVertex3f(xL1, highY, bz);
+                            rlTexCoord2f(1.0f, 0.0f); rlVertex3f(xL1, lowY, bz);
+                        rlEnd();
+                        rlSetTexture(windowView2.texture.id);
+                        rlBegin(RL_QUADS);
+                            rlColor4ub(255, 255, 255, 255);
+                            rlTexCoord2f(0.0f, 0.0f); rlVertex3f(xR0, lowY, bz);
+                            rlTexCoord2f(1.0f, 0.0f); rlVertex3f(xR1, lowY, bz);
+                            rlTexCoord2f(1.0f, 1.0f); rlVertex3f(xR1, highY, bz);
+                            rlTexCoord2f(0.0f, 1.0f); rlVertex3f(xR0, highY, bz);
+                            rlTexCoord2f(0.0f, 0.0f); rlVertex3f(xR0, lowY, bz);
+                            rlTexCoord2f(0.0f, 1.0f); rlVertex3f(xR0, highY, bz);
+                            rlTexCoord2f(1.0f, 1.0f); rlVertex3f(xR1, highY, bz);
+                            rlTexCoord2f(1.0f, 0.0f); rlVertex3f(xR1, lowY, bz);
+                        rlEnd();
+                        rlSetTexture(0);
+
+                        DrawCube(leftWindow, interiorWindowSize, interiorWindowSize, 0.04f, interiorGlassColor);
+                        DrawCube(rightWindow, interiorWindowSize, interiorWindowSize, 0.04f, interiorGlassColor);
+
+                        for (const WindowRainDrop& drop : windowRainDrops)
                         {
-                            float wz = interiorCenter.z + wr * 0.3f;
-                            DrawLine3D(Vector3{ westWindow.x - 0.08f, interiorWindowY + 0.4f, wz }, Vector3{ westWindow.x - 0.08f, interiorWindowY - 0.4f, wz }, interiorRainColor);
-                            DrawLine3D(Vector3{ eastWindow.x + 0.08f, interiorWindowY + 0.4f, wz }, Vector3{ eastWindow.x + 0.08f, interiorWindowY - 0.4f, wz }, interiorRainColor);
+                            if (drop.state == RAIN_WAITING) continue;
+                            float lz = leftWindow.z + 0.08f;
+                            float rz = rightWindow.z + 0.08f;
+                            float lx = leftWindow.x + drop.xOffset;
+                            float rx = rightWindow.x + drop.xOffset;
+                            if (drop.state == RAIN_IMPACT)
+                            {
+                                // A quick bright "+" flash at the strike point, shrinking and
+                                // fading out over the impact's short lifetime.
+                                float t = drop.timer / windowRainImpactDuration;
+                                Color flashColor = interiorRainColor;
+                                flashColor.a = (unsigned char)(255.0f * t);
+                                float r = 0.03f + 0.06f * (1.0f - t);
+                                DrawLine3D(Vector3{ lx - r, drop.y, lz }, Vector3{ lx + r, drop.y, lz }, flashColor);
+                                DrawLine3D(Vector3{ lx, drop.y - r, lz }, Vector3{ lx, drop.y + r, lz }, flashColor);
+                                DrawLine3D(Vector3{ rx - r, drop.y, rz }, Vector3{ rx + r, drop.y, rz }, flashColor);
+                                DrawLine3D(Vector3{ rx, drop.y - r, rz }, Vector3{ rx, drop.y + r, rz }, flashColor);
+                            }
+                            else // RAIN_DRIPPING
+                            {
+                                float halfLen = drop.length / 2.0f;
+                                DrawLine3D(Vector3{ lx, drop.y + halfLen, lz }, Vector3{ lx, drop.y - halfLen, lz }, interiorRainColor);
+                                DrawLine3D(Vector3{ rx, drop.y + halfLen, rz }, Vector3{ rx, drop.y - halfLen, rz }, interiorRainColor);
+                            }
                         }
+                    }
+
+                    // Furniture: a plain table-and-chairs plus a sofa, simple blocky shapes to
+                    // match everything else here rather than anything more detailed - twice the
+                    // size (and twice the offsets) of the original set.
+                    {
+                        DrawCube(Vector3{ tableCenter.x, 0.84f, tableCenter.z }, 1.6f, 0.1f, 1.6f, furnitureWoodColor);
+                        for (int lx = -1; lx <= 1; lx += 2)
+                        for (int lz = -1; lz <= 1; lz += 2)
+                            DrawCube(Vector3{ tableCenter.x + lx * 0.7f, 0.42f, tableCenter.z + lz * 0.7f }, 0.1f, 0.84f, 0.1f, furnitureWoodColor);
+
+                        Vector3 chairCenters[2] = { chairACenter, chairBCenter };
+                        for (const Vector3& chair : chairCenters)
+                        {
+                            DrawCube(Vector3{ chair.x, 0.44f, chair.z }, 0.76f, 0.1f, 0.76f, furnitureWoodColor);
+                            DrawCube(Vector3{ chair.x, 0.84f, chair.z - 0.34f }, 0.76f, 0.8f, 0.1f, furnitureWoodColor);
+                            for (int lx = -1; lx <= 1; lx += 2)
+                            for (int lz = -1; lz <= 1; lz += 2)
+                                DrawCube(Vector3{ chair.x + lx * 0.34f, 0.22f, chair.z + lz * 0.34f }, 0.1f, 0.44f, 0.1f, furnitureWoodColor);
+                        }
+
+                        // Backrest on the wall side (west, smaller x) since the sofa sits
+                        // against the west wall facing into the room.
+                        DrawCube(Vector3{ sofaCenter.x, 0.56f, sofaCenter.z }, 1.2f, 1.0f, 2.6f, sofaColor);
+                        DrawCube(Vector3{ sofaCenter.x - 0.54f, 1.24f, sofaCenter.z }, 0.24f, 0.9f, 2.6f, sofaColor);
+                    }
+
+                    // Pendant lamp: cord down from the ceiling, a conical shade, then the bulb
+                    // and its glow drawn additively so the fixture itself looks lit rather than
+                    // just another ambient-darkened shape.
+                    DrawCylinder(Vector3{ lampShadeCenter.x, lampShadeCenter.y, lampShadeCenter.z }, 0.015f, 0.015f, interiorHeight - lampShadeCenter.y, 6, lampCordColor);
+                    DrawCylinder(Vector3{ lampShadeCenter.x, lampShadeCenter.y - 0.22f, lampShadeCenter.z }, 0.12f, 0.3f, 0.22f, 10, lampShadeColor);
+                    BeginBlendMode(BLEND_ADDITIVE);
+                        DrawSphere(Vector3{ lampShadeCenter.x, lampShadeCenter.y - 0.26f, lampShadeCenter.z }, 0.1f, lampGlowColor);
+                        DrawBillboard(camera, glowTexture, Vector3{ lampShadeCenter.x, lampShadeCenter.y - 0.3f, lampShadeCenter.z }, 2.2f, lampGlowColor);
+                    EndBlendMode();
+
+                    // The supermarket's own interior: same offstage-box approach as the house
+                    // interior above, just bigger, paler, and with shelving racks down the
+                    // middle instead of a painting on the far wall.
+                    DrawCube(Vector3{ marketInteriorCenter.x, 0.0f, marketInteriorCenter.z }, marketHalfSize * 2.0f, 0.2f, marketHalfSize * 2.0f, marketFloorColor);
+                    DrawCube(Vector3{ marketInteriorCenter.x, marketHeight, marketInteriorCenter.z }, marketHalfSize * 2.0f, 0.2f, marketHalfSize * 2.0f, marketWallColor);
+                    DrawCube(Vector3{ marketInteriorCenter.x - marketHalfSize, marketHeight / 2.0f, marketInteriorCenter.z }, 0.2f, marketHeight, marketHalfSize * 2.0f, marketWallColor);
+                    DrawCube(Vector3{ marketInteriorCenter.x + marketHalfSize, marketHeight / 2.0f, marketInteriorCenter.z }, 0.2f, marketHeight, marketHalfSize * 2.0f, marketWallColor);
+                    DrawCube(Vector3{ marketInteriorCenter.x, marketHeight / 2.0f, marketInteriorCenter.z - marketHalfSize }, marketHalfSize * 2.0f, marketHeight, 0.2f, marketWallColor);
+                    DrawCube(Vector3{ marketInteriorCenter.x, marketHeight / 2.0f, marketInteriorCenter.z + marketHalfSize }, marketHalfSize * 2.0f, marketHeight, 0.2f, marketWallColor);
+
+                    DrawCube(marketDoorCenter, supermarketDoorWidth, supermarketDoorHeight, 0.08f, supermarketGlassColor);
+
+                    // Windows flanking the market's door: the same real-render-texture-through-
+                    // glass treatment as the house windows (see the house's own window block for
+                    // the fuller explanation of the V-flip and both-windings quad), reusing the
+                    // same windowView1/windowView2 textures and windowRainDrops animation.
+                    {
+                        Vector3 marketLeftWindow = { marketInteriorCenter.x - marketDoorWindowXOffset, marketWindowY, marketInteriorCenter.z - marketHalfSize + windowGlassOffset };
+                        Vector3 marketRightWindow = { marketInteriorCenter.x + marketDoorWindowXOffset, marketWindowY, marketInteriorCenter.z - marketHalfSize + windowGlassOffset };
+                        float mbz = marketInteriorCenter.z - marketHalfSize + windowBackdropOffset;
+                        float mHalfW = interiorWindowSize / 2.0f;
+                        float mLowY = marketWindowY - mHalfW;
+                        float mHighY = marketWindowY + mHalfW;
+                        float mxL0 = marketLeftWindow.x - mHalfW;
+                        float mxL1 = marketLeftWindow.x + mHalfW;
+                        float mxR0 = marketRightWindow.x - mHalfW;
+                        float mxR1 = marketRightWindow.x + mHalfW;
+
+                        rlSetTexture(windowView1.texture.id);
+                        rlBegin(RL_QUADS);
+                            rlColor4ub(255, 255, 255, 255);
+                            rlTexCoord2f(0.0f, 0.0f); rlVertex3f(mxL0, mLowY, mbz);
+                            rlTexCoord2f(1.0f, 0.0f); rlVertex3f(mxL1, mLowY, mbz);
+                            rlTexCoord2f(1.0f, 1.0f); rlVertex3f(mxL1, mHighY, mbz);
+                            rlTexCoord2f(0.0f, 1.0f); rlVertex3f(mxL0, mHighY, mbz);
+                            rlTexCoord2f(0.0f, 0.0f); rlVertex3f(mxL0, mLowY, mbz);
+                            rlTexCoord2f(0.0f, 1.0f); rlVertex3f(mxL0, mHighY, mbz);
+                            rlTexCoord2f(1.0f, 1.0f); rlVertex3f(mxL1, mHighY, mbz);
+                            rlTexCoord2f(1.0f, 0.0f); rlVertex3f(mxL1, mLowY, mbz);
+                        rlEnd();
+                        rlSetTexture(windowView2.texture.id);
+                        rlBegin(RL_QUADS);
+                            rlColor4ub(255, 255, 255, 255);
+                            rlTexCoord2f(0.0f, 0.0f); rlVertex3f(mxR0, mLowY, mbz);
+                            rlTexCoord2f(1.0f, 0.0f); rlVertex3f(mxR1, mLowY, mbz);
+                            rlTexCoord2f(1.0f, 1.0f); rlVertex3f(mxR1, mHighY, mbz);
+                            rlTexCoord2f(0.0f, 1.0f); rlVertex3f(mxR0, mHighY, mbz);
+                            rlTexCoord2f(0.0f, 0.0f); rlVertex3f(mxR0, mLowY, mbz);
+                            rlTexCoord2f(0.0f, 1.0f); rlVertex3f(mxR0, mHighY, mbz);
+                            rlTexCoord2f(1.0f, 1.0f); rlVertex3f(mxR1, mHighY, mbz);
+                            rlTexCoord2f(1.0f, 0.0f); rlVertex3f(mxR1, mLowY, mbz);
+                        rlEnd();
+                        rlSetTexture(0);
+
+                        DrawCube(marketLeftWindow, interiorWindowSize, interiorWindowSize, 0.04f, interiorGlassColor);
+                        DrawCube(marketRightWindow, interiorWindowSize, interiorWindowSize, 0.04f, interiorGlassColor);
+
+                        for (const WindowRainDrop& drop : windowRainDrops)
+                        {
+                            if (drop.state == RAIN_WAITING) continue;
+                            float lz = marketLeftWindow.z + 0.08f;
+                            float rz = marketRightWindow.z + 0.08f;
+                            float lx = marketLeftWindow.x + drop.xOffset;
+                            float rx = marketRightWindow.x + drop.xOffset;
+                            if (drop.state == RAIN_IMPACT)
+                            {
+                                float t = drop.timer / windowRainImpactDuration;
+                                Color flashColor = interiorRainColor;
+                                flashColor.a = (unsigned char)(255.0f * t);
+                                float r = 0.03f + 0.06f * (1.0f - t);
+                                DrawLine3D(Vector3{ lx - r, drop.y, lz }, Vector3{ lx + r, drop.y, lz }, flashColor);
+                                DrawLine3D(Vector3{ lx, drop.y - r, lz }, Vector3{ lx, drop.y + r, lz }, flashColor);
+                                DrawLine3D(Vector3{ rx - r, drop.y, rz }, Vector3{ rx + r, drop.y, rz }, flashColor);
+                                DrawLine3D(Vector3{ rx, drop.y - r, rz }, Vector3{ rx, drop.y + r, rz }, flashColor);
+                            }
+                            else
+                            {
+                                float halfLen = drop.length / 2.0f;
+                                DrawLine3D(Vector3{ lx, drop.y + halfLen, lz }, Vector3{ lx, drop.y - halfLen, lz }, interiorRainColor);
+                                DrawLine3D(Vector3{ rx, drop.y + halfLen, rz }, Vector3{ rx, drop.y - halfLen, rz }, interiorRainColor);
+                            }
+                        }
+                    }
+
+                    for (int ri = 0; ri < 3; ri++)
+                    {
+                        Vector3 rackCenter = rackCenters[ri];
+                        DrawCube(Vector3{ rackCenter.x, rackHeight / 2.0f, rackCenter.z }, rackHalfX * 2.0f, rackHeight, rackHalfZ * 2.0f, rackFrameColor);
+                        for (int b = 0; b < 3; b++)
+                        {
+                            float by = 0.35f + b * 0.55f;
+                            DrawCube(Vector3{ rackCenter.x, by, rackCenter.z }, rackHalfX * 2.0f + 0.05f, 0.3f, rackHalfZ * 2.0f - 0.3f, rackProductColors[(ri + b) % 3]);
+                        }
+                    }
+
+                    // Ceiling strip lights: opaque housing plus an inset additive tube, cold
+                    // white-blue rather than the houses' warm pendant lamp.
+                    for (int si = 0; si < 4; si++)
+                    {
+                        Vector3 stripCenter = { marketInteriorCenter.x + marketStripXs[si], marketHeight - 0.15f, marketInteriorCenter.z };
+                        DrawCube(stripCenter, 0.35f, 0.12f, marketStripLength, marketStripHousingColor);
+                    }
+                    BeginBlendMode(BLEND_ADDITIVE);
+                        for (int si = 0; si < 4; si++)
+                        {
+                            Vector3 stripCenter = { marketInteriorCenter.x + marketStripXs[si], marketHeight - 0.19f, marketInteriorCenter.z };
+                            DrawCube(stripCenter, 0.28f, 0.05f, marketStripLength - 0.4f, marketStripLightColor);
+                        }
+                    EndBlendMode();
+
+                    // Checkout counter and its register, plus the employee standing behind it.
+                    DrawCube(Vector3{ counterCenter.x, counterHeight / 2.0f, counterCenter.z }, counterHalfX * 2.0f, counterHeight, counterHalfZ * 2.0f, counterColor);
+                    DrawCube(registerCenter, 0.3f, 0.32f, 0.25f, registerColor);
+                    {
+                        Vector3 feet = { employeePos.x, 0.3f, employeePos.z };
+                        Vector3 shoulders = { employeePos.x, 1.4f, employeePos.z };
+                        DrawCapsule(feet, shoulders, 0.22f, 8, 4, employeeBodyColor);
+                        DrawSphere(Vector3{ employeePos.x, 1.62f, employeePos.z }, 0.16f, employeeHeadColor);
                     }
 
                     for (const Tree& tree : trees)
@@ -1638,6 +2304,8 @@ int main(void)
     for (Texture2D& paintingTexture : paintingTextures) UnloadTexture(paintingTexture);
     UnloadTexture(cloudTexture);
     UnloadTexture(glowTexture);
+    UnloadRenderTexture(windowView1);
+    UnloadRenderTexture(windowView2);
     UnloadShader(fogShader);
 
     UnloadMusicStream(rainMusic);

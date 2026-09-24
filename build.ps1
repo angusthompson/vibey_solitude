@@ -22,8 +22,10 @@ if (Test-Path ".\sound_effects") {
     Copy-Item ".\sound_effects\*" ".\build\sound_effects\" -Recurse -Force
 }
 if (Test-Path ".\soundtrack") {
+    # Top-level .wav files only - deliberately not recursive, so a "maybes" (or any other)
+    # subfolder of tracks not ready for the game stays out of the build.
     New-Item -ItemType Directory -Force -Path ".\build\soundtrack" | Out-Null
-    Copy-Item ".\soundtrack\*" ".\build\soundtrack\" -Recurse -Force
+    Get-ChildItem ".\soundtrack" -File -Filter "*.wav" | Copy-Item -Destination ".\build\soundtrack\" -Force
 }
 if (Test-Path ".\monologues.txt") { Copy-Item ".\monologues.txt" ".\build\monologues.txt" -Force }
 if (Test-Path ".\poster") {
